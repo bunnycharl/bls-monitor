@@ -90,35 +90,22 @@ def _create_proxy_auth_extension(username: str, password: str) -> str:
 
 
 def _kill_zombie_chrome(port: int) -> None:
-    """Kill any existing Chrome process listening on the CDP port."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        result = sock.connect_ex(("127.0.0.1", port))
-        if result == 0:
-            logger.warning("Port %d already in use, killing zombie Chrome...", port)
-            import platform
-            if platform.system() == "Windows":
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", "chrome.exe"],
-                    capture_output=True,
-                )
-            else:
-                subprocess.run(
-                    ["lsof", "-ti", f":{port}"],
-                    capture_output=True, text=True,
-                )
-                result_lsof = subprocess.run(
-                    ["lsof", "-ti", f":{port}"],
-                    capture_output=True, text=True,
-                )
-                for pid in result_lsof.stdout.strip().split("\n"):
-                    if pid:
-                        subprocess.run(["kill", "-9", pid], capture_output=True)
-            logger.info("Zombie Chrome killed, waiting for port to free...")
-            import time
-            time.sleep(2)
-    finally:
-        sock.close()
+    """Kill ALL existing Chrome processes (zombies + active) before launching."""
+    import platform
+    import time
+
+    if platform.system() == "Windows":
+        subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
+        return
+
+    # Kill all chrome processes to prevent zombies blocking the new instance
+    result = subprocess.run(
+        ["pkill", "-9", "-f", "google-chrome"],
+        capture_output=True,
+    )
+    if result.returncode == 0:
+        logger.info("Killed existing Chrome processes")
+        time.sleep(1)
 
 
 class BrowserManager:
@@ -193,19 +180,23 @@ class BrowserManager:
         self._chrome_proc = subprocess.Popen(
             chrome_args,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
 
         # Wait for CDP to become available
         cdp_url = f"http://127.0.0.1:{CDP_PORT}"
-        for attempt in range(20):
+        for attempt in range(30):
+            # Check if Chrome crashed
+            if self._chrome_proc.poll() is not None:
+                stderr = self._chrome_proc.stderr.read().decode(errors="replace")[-500:]
+                raise RuntimeError(f"Chrome exited with code {self._chrome_proc.returncode}: {stderr}")
             try:
                 self._browser = await self._playwright.chromium.connect_over_cdp(cdp_url)
                 break
             except Exception:
                 await asyncio.sleep(0.5)
         else:
-            raise RuntimeError("Could not connect to Chrome CDP after 10 seconds")
+            raise RuntimeError("Could not connect to Chrome CDP after 15 seconds")
 
         # Use the default context created by Chrome
         contexts = self._browser.contexts
