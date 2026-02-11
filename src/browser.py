@@ -129,6 +129,8 @@ class BrowserManager:
         self._context: BrowserContext | None = None
         self.page: Page | None = None
         self._chrome_proc: subprocess.Popen | None = None
+        self._cdp_session = None
+        self._proxy_creds: dict | None = None
 
     async def launch(self) -> None:
         _kill_zombie_chrome(CDP_PORT)
@@ -167,14 +169,12 @@ class BrowserManager:
             chrome_args.insert(2, f"--proxy-server={proxy_server}")
             logger.info("Using proxy: %s", proxy_server)
 
-            # Auth extension (Chrome --proxy-server doesn't support user:pass)
             if proxy.get("username") and proxy.get("password"):
-                ext_path = _create_proxy_auth_extension(
-                    proxy["username"], proxy["password"]
-                )
-                chrome_args.insert(2, f"--load-extension={ext_path}")
-                chrome_args.insert(2, "--disable-extensions-except=" + ext_path)
-                logger.info("Proxy auth extension loaded from %s", ext_path)
+                self._proxy_creds = {
+                    "username": proxy["username"],
+                    "password": proxy["password"],
+                }
+                logger.info("Proxy auth will be handled via CDP Fetch API")
 
         if bc["headless"]:
             chrome_args.insert(2, "--headless=new")
@@ -210,6 +210,10 @@ class BrowserManager:
             self._context = await self._browser.new_context()
             self.page = await self._context.new_page()
 
+        # Set up CDP proxy auth handler (extensions don't work in headless)
+        if self._proxy_creds:
+            await self._setup_proxy_auth()
+
         # Apply stealth to avoid bot detection
         await stealth_async(self.page)
         await self.page.add_init_script("""() => {
@@ -220,6 +224,43 @@ class BrowserManager:
         }""")
 
         logger.info("Connected to Chrome via CDP (headless=%s)", bc["headless"])
+
+    async def _setup_proxy_auth(self) -> None:
+        """Set up CDP Fetch domain to handle proxy authentication."""
+        self._cdp_session = await self._context.new_cdp_session(self.page)
+        creds = self._proxy_creds
+
+        def on_auth_required(params):
+            request_id = params["requestId"]
+            asyncio.ensure_future(
+                self._cdp_session.send(
+                    "Fetch.continueWithAuth",
+                    {
+                        "requestId": request_id,
+                        "authChallengeResponse": {
+                            "response": "ProvideCredentials",
+                            "username": creds["username"],
+                            "password": creds["password"],
+                        },
+                    },
+                )
+            )
+
+        def on_request_paused(params):
+            request_id = params["requestId"]
+            asyncio.ensure_future(
+                self._cdp_session.send(
+                    "Fetch.continueRequest", {"requestId": request_id}
+                )
+            )
+
+        self._cdp_session.on("Fetch.authRequired", on_auth_required)
+        self._cdp_session.on("Fetch.requestPaused", on_request_paused)
+
+        await self._cdp_session.send(
+            "Fetch.enable", {"handleAuthRequests": True}
+        )
+        logger.info("CDP proxy auth handler enabled")
 
     async def close(self) -> None:
         try:
