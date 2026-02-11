@@ -190,25 +190,33 @@ class CaptchaSolver:
 
         logger.info("BLS captcha target number: %s", target_number)
 
-        # 2. Get visible cell IDs in DOM order.
+        # 2. Get visible cell IDs sorted by visual position (top→bottom, left→right).
         #    Real cells have "display: block" in inline style;
         #    honeypot cells rely on CSS classes for display.
+        #    Sort by bounding rect to ensure correct 1-9 grid mapping.
         cell_ids = await captcha_page.evaluate("""() => {
-            const result = [];
-            const cells = document.querySelectorAll('.col-4[id]');
+            const visible = [];
+            const cells = document.querySelectorAll('.main-div-container .col-4[id]');
             for (const cell of cells) {
                 if (cell.style.display === 'block') {
-                    result.push(cell.id);
+                    const rect = cell.getBoundingClientRect();
+                    visible.push({id: cell.id, top: rect.top, left: rect.left});
                 }
             }
-            return result;
+            // Sort by row (top) then column (left), with 20px tolerance for same row
+            visible.sort((a, b) => {
+                if (Math.abs(a.top - b.top) > 20) return a.top - b.top;
+                return a.left - b.left;
+            });
+            // Return only first 9 (the real 3x3 grid)
+            return visible.slice(0, 9).map(c => c.id);
         }""")
 
         if not cell_ids or len(cell_ids) < 9:
             logger.error("Expected 9 visible cells, found %d", len(cell_ids) if cell_ids else 0)
             return False
 
-        logger.info("Found %d visible grid cells", len(cell_ids))
+        logger.info("Found %d grid cells (sorted by position)", len(cell_ids))
 
         # 3. Screenshot the captcha grid area
         grid_el = await captcha_page.query_selector('#captcha-main-div')
@@ -264,10 +272,21 @@ class CaptchaSolver:
             )
             await asyncio.sleep(0.3)
 
-        # 8. Submit via JS onSubmit()
+        # 8. Check form exists, set selection, and submit
+        form_ok = await captcha_page.evaluate("""(ids) => {
+            const form = document.getElementById('captchaForm');
+            const field = document.getElementById('SelectedImages');
+            return {
+                formExists: !!form,
+                fieldExists: !!field,
+                selectionCount: window.selection ? window.selection.length : -1,
+            };
+        }""", matching_ids)
+        logger.info("Form state: %s", form_ok)
+
         await captcha_page.evaluate("onSubmit()")
 
-        # 9. Wait for success response
+        # 9. Wait for success response (ajax callback shows #captcha-message-div)
         try:
             await captcha_page.wait_for_function("""() => {
                 const msg = document.getElementById('captcha-message-div');
@@ -276,11 +295,15 @@ class CaptchaSolver:
             logger.info("BLS captcha verified successfully")
             return True
         except Exception:
-            logger.warning("Captcha success message not detected, checking page state...")
+            # Save debug screenshot
+            try:
+                await captcha_page.screenshot(path="screenshots/debug_captcha_after_submit.png")
+            except Exception:
+                pass
             result_text = await captcha_page.evaluate(
                 "() => document.body.innerText || ''"
             )
-            logger.info("Captcha page text: %s", result_text[:300])
+            logger.warning("Captcha not verified. Page text: %s", result_text[:300])
             return "Verified" in result_text
 
     # ------------------------------------------------------------------
