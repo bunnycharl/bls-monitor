@@ -88,6 +88,7 @@ class Authenticator:
         checkbox = page.locator('input[type="checkbox"]').first
         if await checkbox.is_visible():
             await checkbox.check()
+            logger.info("Privacy checkbox checked")
             await self.human.random_delay(300, 600)
 
         # Solve captcha
@@ -99,16 +100,30 @@ class Authenticator:
             'button:has-text("Verify"), button[type="submit"], '
             'input[type="submit"], a:has-text("Verify")'
         ).first
+        logger.info("Clicking Verify button")
         await self.human.click_with_delay(submit)
 
-        # Wait for navigation away from login
+        # Wait for navigation or page change
+        await self.human.random_delay(3000, 5000)
+
+        # Save screenshot after submit for debugging
         try:
-            await page.wait_for_url("**/home/**", timeout=20000)
+            await page.screenshot(path="screenshots/debug_after_verify.png")
+            logger.info("After-verify URL: %s", page.url)
         except Exception:
-            current = page.url
-            if "login" in current.lower():
-                raise RuntimeError(f"Login failed — still on login page: {current}")
-            logger.warning("Unexpected post-login URL: %s", current)
+            pass
+
+        # Check if login succeeded
+        current = page.url
+        if "login" in current.lower():
+            # Try waiting a bit more for navigation
+            try:
+                await page.wait_for_url("**/home/**", timeout=10000)
+            except Exception:
+                current = page.url
+                if "login" in current.lower():
+                    raise RuntimeError(f"Login failed — still on login page: {current}")
+                logger.warning("Unexpected post-login URL: %s", current)
 
         self._last_login_time = time.time()
         logger.info("Login successful")
