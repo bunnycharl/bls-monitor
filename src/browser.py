@@ -141,6 +141,16 @@ class BrowserManager:
         chrome_path = _find_chrome()
         os.makedirs(CHROME_USER_DATA, exist_ok=True)
 
+        # Clean stale lock files from previous runs
+        for lock in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
+            lock_path = os.path.join(CHROME_USER_DATA, lock)
+            if os.path.exists(lock_path):
+                try:
+                    os.remove(lock_path)
+                    logger.info("Removed stale Chrome lock: %s", lock)
+                except OSError:
+                    pass
+
         chrome_args = [
             chrome_path,
             f"--remote-debugging-port={CDP_PORT}",
