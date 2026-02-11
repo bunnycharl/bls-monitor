@@ -1,0 +1,23 @@
+[Unit]
+Description=BLS Portugal Russia Appointment Slot Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=blsmonitor
+WorkingDirectory=/opt/bls-monitor
+ExecStart=/opt/bls-monitor/venv/bin/python -m src.main
+Restart=always
+RestartSec=30
+
+# Credentials via environment variables
+EnvironmentFile=/opt/bls-monitor/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/bls-monitor/logs /opt/bls-monitor/screenshots /opt/bls-monitor/session
+
+[Install]
+WantedBy=multi-user.target

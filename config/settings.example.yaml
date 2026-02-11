@@ -1,0 +1,43 @@
+# BLS Portugal Russia Appointment Slot Monitor — Configuration
+# Sensitive values can be overridden via environment variables.
+
+bls:
+  base_url: "https://russia.blsportugal.com"
+  login_url: "https://russia.blsportugal.com/Global/account/login"
+  home_url: "https://russia.blsportugal.com/Global/home/index"
+  visa_verification_url: "https://russia.blsportugal.com/Global/bls/VisaTypeVerification"
+  email: ""        # env: BLS_EMAIL
+  password: ""     # env: BLS_PASSWORD
+
+form:
+  appointment_category: "Normal"
+  appointment_for: "Family"
+  number_of_members: "2 Members"
+  location: "Moscow"
+  visa_type: "National Visa"
+  visa_sub_type: "Residency visa for establishment of residence for pensioners, religious purposes or people living on their own income"
+
+captcha:
+  provider: "2captcha"
+  api_key: ""      # env: CAPTCHA_API_KEY
+  timeout: 120
+  poll_interval: 5
+
+telegram:
+  bot_token: ""    # env: TELEGRAM_BOT_TOKEN
+  chat_id: ""      # env: TELEGRAM_CHAT_ID
+
+monitoring:
+  check_interval_min: 180    # seconds, minimum wait between checks
+  check_interval_max: 300    # seconds, maximum wait between checks
+  max_retries: 3             # consecutive failures before alerting
+  session_refresh_interval: 1800  # seconds, force re-login interval
+
+browser:
+  headless: true
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  viewport_width: 1920
+  viewport_height: 1080
+  locale: "ru-RU"
+  timezone: "Europe/Moscow"
+  proxy: ""        # env: BLS_PROXY, format: "http://user:pass@host:port"
