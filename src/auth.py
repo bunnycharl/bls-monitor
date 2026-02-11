@@ -62,6 +62,15 @@ class Authenticator:
         if await self._is_cloudflare(page):
             await self._handle_cloudflare(page)
 
+        # Debug: save screenshot of login page for troubleshooting
+        try:
+            import os
+            os.makedirs("screenshots", exist_ok=True)
+            await page.screenshot(path="screenshots/debug_login_page.png")
+            logger.info("Login page screenshot saved. URL: %s, Title: %s", page.url, await page.title())
+        except Exception as e:
+            logger.warning("Could not save debug screenshot: %s", e)
+
         # Fill email
         email_sel = 'input[type="email"], input[name="email"], input#email, input[name="Email"]'
         await self.human.type_like_human(page, email_sel, self.config["bls"]["email"])
