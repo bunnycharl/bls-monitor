@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import re
 
@@ -154,6 +155,118 @@ class CaptchaSolver:
         raise RuntimeError(
             f"2captcha failed after {MAX_SOLVE_RETRIES} attempts: {last_error}"
         )
+
+    # ------------------------------------------------------------------
+    # BLS grid captcha solving
+    # ------------------------------------------------------------------
+
+    async def solve_bls_grid(self, captcha_page) -> bool:
+        """Solve the BLS custom grid captcha.
+
+        The captcha shows a 3x3 grid of number images and asks to
+        select all images matching a target number.
+
+        Returns True if solved successfully.
+        """
+        # 1. Extract the target number from the visible label
+        target_number = await captcha_page.evaluate("""() => {
+            // Find the visible box-label
+            const labels = document.querySelectorAll('.box-label');
+            for (const label of labels) {
+                const style = window.getComputedStyle(label);
+                if (style.display !== 'none' && style.visibility !== 'hidden'
+                    && label.offsetParent !== null) {
+                    const m = label.textContent.match(/number\\s+(\\d+)/);
+                    if (m) return m[1];
+                }
+            }
+            // Fallback: try all labels
+            for (const label of labels) {
+                const m = label.textContent.match(/number\\s+(\\d+)/);
+                if (m) return m[1];
+            }
+            return null;
+        }""")
+
+        if not target_number:
+            logger.error("Could not extract target number from BLS captcha")
+            return False
+
+        logger.info("BLS captcha target number: %s", target_number)
+
+        # 2. Get all cell images (base64 encoded)
+        cells = await captcha_page.evaluate("""() => {
+            const result = [];
+            const imgs = document.querySelectorAll('.captcha-img');
+            for (const img of imgs) {
+                const parent = img.closest('[id]');
+                const src = img.getAttribute('src') || '';
+                result.push({
+                    id: parent ? parent.id : null,
+                    src: src,
+                });
+            }
+            return result;
+        }""")
+
+        if not cells:
+            logger.error("No captcha cell images found")
+            return False
+
+        logger.info("Found %d captcha cells, recognizing numbers...", len(cells))
+
+        # 3. Recognize each cell's number using 2captcha
+        loop = asyncio.get_event_loop()
+        matching_ids = []
+
+        for i, cell in enumerate(cells):
+            if not cell.get("src") or not cell.get("id"):
+                continue
+
+            # Extract base64 data from src
+            src = cell["src"]
+            if src.startswith("data:"):
+                # Remove "data:image/...;base64," prefix
+                b64_data = src.split(",", 1)[1] if "," in src else src
+            else:
+                continue
+
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda b64=b64_data: self._solver.normal(
+                        b64, numeric=1, minLen=2, maxLen=4
+                    ),
+                )
+                recognized = result.get("code", "").strip()
+                logger.info("Cell %d (%s): recognized=%s, target=%s",
+                            i, cell["id"][:8], recognized, target_number)
+
+                if recognized == target_number:
+                    matching_ids.append(cell["id"])
+            except Exception as e:
+                logger.warning("Failed to recognize cell %d: %s", i, e)
+                continue
+
+        if not matching_ids:
+            logger.error("No cells matched target number %s", target_number)
+            return False
+
+        logger.info("Clicking %d matching cells: %s", len(matching_ids), matching_ids)
+
+        # 4. Click matching cells
+        for cell_id in matching_ids:
+            img = captcha_page.locator(f"#{cell_id} img")
+            await img.click()
+            await asyncio.sleep(0.3)
+
+        # 5. Click "Submit Selection"
+        submit = captcha_page.locator('text=Submit Selection').first
+        await submit.click()
+        await asyncio.sleep(2)
+
+        logger.info("BLS captcha submitted")
+        return True
 
     # ------------------------------------------------------------------
     # Token injection
