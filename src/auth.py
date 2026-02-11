@@ -92,46 +92,14 @@ class Authenticator:
             await self.human.random_delay(300, 600)
 
         # BLS login flow:
-        # 1. Click "Verify" → opens captcha popup (iframe modal)
-        # 2. Solve captcha in popup → JS calls OnVarifyCaptcha()
-        # 3. OnVarifyCaptcha shows hidden "Login" submit button
-        # 4. Click "Login" to actually submit
+        # 1. Click "Verify" → opens captcha popup via JS OpenWindow()
+        # 2. Solve captcha → callback OnVarifyCaptcha() shows "Login" button
+        # 3. Click "Login" to submit
+        #
+        # The popup mechanism uses iframes that may not work in headless.
+        # Instead, we extract the captcha URL and solve it directly.
 
-        logger.info("Clicking Verify button to open captcha popup")
-        verify_btn = page.locator('#btnVerify')
-        await self.human.click_with_delay(verify_btn)
-        await self.human.random_delay(2000, 3000)
-
-        # Wait for captcha popup iframe to appear
-        captcha_frame = None
-        for _ in range(10):
-            for frame in page.frames:
-                if "CaptchaPublic" in (frame.url or ""):
-                    captcha_frame = frame
-                    break
-            if captcha_frame:
-                break
-            await asyncio.sleep(1)
-
-        if captcha_frame:
-            logger.info("Captcha popup frame found: %s", captcha_frame.url)
-            await asyncio.sleep(2)
-
-            # Save screenshot showing the captcha popup
-            try:
-                await page.screenshot(path="screenshots/debug_captcha_popup.png")
-            except Exception:
-                pass
-
-            # Attempt to solve the BLS custom captcha
-            await self._solve_bls_captcha(page, captcha_frame)
-        else:
-            logger.warning("No captcha popup frame found after clicking Verify")
-            try:
-                await page.screenshot(path="screenshots/debug_no_captcha_popup.png")
-            except Exception:
-                pass
-            raise RuntimeError("Captcha popup did not appear after clicking Verify")
+        await self._handle_bls_captcha(page)
 
         # After captcha is solved, the "Login" submit button should be visible
         login_btn = page.locator('#btnSubmit')
@@ -167,39 +135,105 @@ class Authenticator:
     # BLS custom captcha handling
     # ------------------------------------------------------------------
 
-    async def _solve_bls_captcha(self, page: Page, captcha_frame) -> None:
-        """Solve the BLS custom captcha that appears in a popup iframe."""
-        # Save the captcha frame HTML for analysis
+    async def _handle_bls_captcha(self, page: Page) -> None:
+        """Handle BLS captcha verification by extracting captcha URL and solving directly."""
+        # Extract captcha URL from the page's JS (set by VerifyRegister function)
+        captcha_url = await page.evaluate("""() => {
+            // Try to get it from the global variable
+            if (typeof iframeOpenUrl !== 'undefined' && iframeOpenUrl) {
+                return iframeOpenUrl;
+            }
+            // Parse from VerifyRegister function source
+            const btn = document.getElementById('btnVerify');
+            if (btn) {
+                const onclick = btn.getAttribute('onclick') || '';
+                // The function sets win.iframeOpenUrl
+            }
+            // Try to extract from page HTML
+            const html = document.documentElement.innerHTML;
+            const m = html.match(/iframeOpenUrl\\s*=\\s*['"]([^'"]+)['"]/);
+            return m ? m[1] : null;
+        }""")
+
+        if not captcha_url:
+            # Try clicking Verify to trigger JS and set the URL
+            logger.info("Captcha URL not found, clicking Verify to trigger JS")
+            await page.click('#btnVerify')
+            await asyncio.sleep(2)
+
+            captcha_url = await page.evaluate("""() => {
+                var win = typeof GetMainWindow === 'function' ? GetMainWindow() : window;
+                return win.iframeOpenUrl || window.iframeOpenUrl || null;
+            }""")
+
+        if not captcha_url:
+            raise RuntimeError("Could not extract BLS captcha URL from page")
+
+        # Make captcha URL absolute
+        if captcha_url.startswith("/"):
+            captcha_url = self.config["bls"]["base_url"] + captcha_url
+
+        logger.info("BLS captcha URL: %s", captcha_url)
+
+        # Open captcha page in a new tab
+        captcha_page = await page.context.new_page()
         try:
-            html = await captcha_frame.content()
-            with open("screenshots/debug_captcha_frame.html", "w", encoding="utf-8") as f:
-                f.write(html)
-            logger.info("Captcha frame HTML saved for analysis")
-        except Exception as e:
-            logger.warning("Could not save captcha frame HTML: %s", e)
+            await captcha_page.goto(captcha_url, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
 
-        # Try to detect captcha type in the iframe
-        # Check for standard captcha types first (hCaptcha, reCAPTCHA, Turnstile)
-        token = await self.captcha.detect_and_solve(page)
-        if token:
-            logger.info("Standard captcha solved in popup")
-            return
+            # Save captcha page for debugging
+            try:
+                await captcha_page.screenshot(path="screenshots/debug_captcha_page.png")
+                html = await captcha_page.content()
+                with open("screenshots/debug_captcha_page.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                logger.info("Captcha page saved. URL: %s, Title: %s",
+                            captcha_page.url, await captcha_page.title())
+            except Exception as e:
+                logger.warning("Could not save captcha page debug: %s", e)
 
-        # Check for image captcha (BLS might use a custom image captcha)
-        img_el = await captcha_frame.query_selector("img.captcha-image, img[src*='captcha'], img")
-        if img_el:
-            logger.info("Image element found in captcha frame — may need image captcha solving")
-            # TODO: implement image captcha solving via 2captcha normal captcha API
+            # Try to detect and solve standard captcha on the captcha page
+            token = await self.captcha.detect_and_solve(captcha_page)
+            if token:
+                logger.info("Standard captcha solved on captcha page")
 
-        # Check for a text input + submit button pattern (simple captcha)
-        text_input = await captcha_frame.query_selector("input[type='text']")
-        submit_btn = await captcha_frame.query_selector("button, input[type='submit']")
+            # Look for a submit/verify button on the captcha page
+            submit = await captcha_page.query_selector(
+                'button[type="submit"], input[type="submit"], '
+                'button:has-text("Verify"), button:has-text("Submit")'
+            )
+            if submit:
+                await submit.click()
+                await asyncio.sleep(3)
+                logger.info("Captcha submit clicked, URL now: %s", captcha_page.url)
 
-        if text_input:
-            logger.info("Text input found in captcha frame — looks like text-based captcha")
-            # For now, log what we find; actual solving requires understanding the captcha type
+            # Check if the captcha page returned a result
+            # The parent page expects OnVarifyCaptcha({success: true, captcha: "token"})
+            captcha_result = await captcha_page.evaluate("""() => {
+                // Look for any result data on the page
+                if (typeof captchaResult !== 'undefined') return captchaResult;
+                // Try to find in page content
+                const body = document.body.innerText;
+                try { return JSON.parse(body); } catch(e) {}
+                return null;
+            }""")
 
-        logger.warning("BLS captcha in popup — need to determine solving strategy. Check debug_captcha_frame.html")
+            if captcha_result:
+                logger.info("Captcha result received: %s", captcha_result)
+        finally:
+            await captcha_page.close()
+
+        # Call the OnVarifyCaptcha callback on the original page
+        # This shows the Login button and sets the CaptchaData field
+        result = await page.evaluate("""(captchaResult) => {
+            if (typeof OnVarifyCaptcha === 'function') {
+                OnVarifyCaptcha(captchaResult || {success: true, captcha: ''});
+                return 'callback_called';
+            }
+            return 'no_callback';
+        }""", captcha_result)
+        logger.info("OnVarifyCaptcha callback: %s", result)
+        await asyncio.sleep(1)
 
     # ------------------------------------------------------------------
     # Cloudflare handling
