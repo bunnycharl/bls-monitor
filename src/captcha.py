@@ -194,11 +194,17 @@ class CaptchaSolver:
 
         logger.info("BLS captcha target number: %s", target_number)
 
-        # 2. Get all cell images (base64 encoded)
+        # 2. Get only VISIBLE cell images (BLS has many hidden honeypot cells)
         cells = await captcha_page.evaluate("""() => {
             const result = [];
             const imgs = document.querySelectorAll('.captcha-img');
             for (const img of imgs) {
+                // Check if the image is actually visible
+                const rect = img.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) continue;
+                const style = window.getComputedStyle(img.parentElement);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+
                 const parent = img.closest('[id]');
                 const src = img.getAttribute('src') || '';
                 result.push({
