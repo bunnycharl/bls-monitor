@@ -74,25 +74,30 @@ class Authenticator:
         except Exception as e:
             logger.warning("Could not save debug data: %s", e)
 
-        # Fill email
-        email_sel = 'input[type="email"], input[name="email"], input#email, input[name="Email"]'
+        # BLS uses honeypot fields: many hidden UserId/Password inputs,
+        # only one pair is visible. Target visible inputs only.
+        email_sel = 'input[name^="UserId"]:visible'
         await self.human.type_like_human(page, email_sel, self.config["bls"]["email"])
         await self.human.random_delay(300, 800)
 
-        # Fill password
-        pass_sel = 'input[type="password"], input[name="password"], input#password, input[name="Password"]'
+        pass_sel = 'input[name^="Password"]:visible'
         await self.human.type_like_human(page, pass_sel, self.config["bls"]["password"])
         await self.human.random_delay(1000, 2000)
+
+        # Check privacy consent checkbox if present
+        checkbox = page.locator('input[type="checkbox"]').first
+        if await checkbox.is_visible():
+            await checkbox.check()
+            await self.human.random_delay(300, 600)
 
         # Solve captcha
         await self.captcha.detect_and_solve(page)
         await self.human.random_delay(500, 1000)
 
-        # Click submit
+        # Click submit (BLS uses "Verify" button)
         submit = page.locator(
-            'button[type="submit"], input[type="submit"], '
-            'button:has-text("Log In"), button:has-text("Login"), '
-            'button:has-text("Sign In")'
+            'button:has-text("Verify"), button[type="submit"], '
+            'input[type="submit"], a:has-text("Verify")'
         ).first
         await self.human.click_with_delay(submit)
 
