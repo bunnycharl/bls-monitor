@@ -91,42 +91,115 @@ class Authenticator:
             logger.info("Privacy checkbox checked")
             await self.human.random_delay(300, 600)
 
-        # Solve captcha
-        await self.captcha.detect_and_solve(page)
-        await self.human.random_delay(500, 1000)
+        # BLS login flow:
+        # 1. Click "Verify" → opens captcha popup (iframe modal)
+        # 2. Solve captcha in popup → JS calls OnVarifyCaptcha()
+        # 3. OnVarifyCaptcha shows hidden "Login" submit button
+        # 4. Click "Login" to actually submit
 
-        # Click submit (BLS uses "Verify" button)
-        submit = page.locator(
-            'button:has-text("Verify"), button[type="submit"], '
-            'input[type="submit"], a:has-text("Verify")'
-        ).first
-        logger.info("Clicking Verify button")
-        await self.human.click_with_delay(submit)
+        logger.info("Clicking Verify button to open captcha popup")
+        verify_btn = page.locator('#btnVerify')
+        await self.human.click_with_delay(verify_btn)
+        await self.human.random_delay(2000, 3000)
 
-        # Wait for navigation or page change
-        await self.human.random_delay(3000, 5000)
+        # Wait for captcha popup iframe to appear
+        captcha_frame = None
+        for _ in range(10):
+            for frame in page.frames:
+                if "CaptchaPublic" in (frame.url or ""):
+                    captcha_frame = frame
+                    break
+            if captcha_frame:
+                break
+            await asyncio.sleep(1)
 
-        # Save screenshot after submit for debugging
-        try:
-            await page.screenshot(path="screenshots/debug_after_verify.png")
-            logger.info("After-verify URL: %s", page.url)
-        except Exception:
-            pass
+        if captcha_frame:
+            logger.info("Captcha popup frame found: %s", captcha_frame.url)
+            await asyncio.sleep(2)
 
-        # Check if login succeeded
-        current = page.url
-        if "login" in current.lower():
-            # Try waiting a bit more for navigation
+            # Save screenshot showing the captcha popup
             try:
-                await page.wait_for_url("**/home/**", timeout=10000)
+                await page.screenshot(path="screenshots/debug_captcha_popup.png")
             except Exception:
-                current = page.url
-                if "login" in current.lower():
-                    raise RuntimeError(f"Login failed — still on login page: {current}")
-                logger.warning("Unexpected post-login URL: %s", current)
+                pass
+
+            # Attempt to solve the BLS custom captcha
+            await self._solve_bls_captcha(page, captcha_frame)
+        else:
+            logger.warning("No captcha popup frame found after clicking Verify")
+            try:
+                await page.screenshot(path="screenshots/debug_no_captcha_popup.png")
+            except Exception:
+                pass
+            raise RuntimeError("Captcha popup did not appear after clicking Verify")
+
+        # After captcha is solved, the "Login" submit button should be visible
+        login_btn = page.locator('#btnSubmit')
+        try:
+            await login_btn.wait_for(state="visible", timeout=10000)
+            logger.info("Login submit button visible, clicking")
+            await self.human.click_with_delay(login_btn)
+        except Exception:
+            logger.warning("Login submit button not visible after captcha")
+            try:
+                await page.screenshot(path="screenshots/debug_no_login_btn.png")
+            except Exception:
+                pass
+            raise RuntimeError("Login button not visible — captcha verification may have failed")
+
+        # Wait for navigation away from login
+        try:
+            await page.wait_for_url("**/home/**", timeout=20000)
+        except Exception:
+            current = page.url
+            try:
+                await page.screenshot(path="screenshots/debug_login_failed.png")
+            except Exception:
+                pass
+            if "login" in current.lower():
+                raise RuntimeError(f"Login failed — still on login page: {current}")
+            logger.warning("Unexpected post-login URL: %s", current)
 
         self._last_login_time = time.time()
         logger.info("Login successful")
+
+    # ------------------------------------------------------------------
+    # BLS custom captcha handling
+    # ------------------------------------------------------------------
+
+    async def _solve_bls_captcha(self, page: Page, captcha_frame) -> None:
+        """Solve the BLS custom captcha that appears in a popup iframe."""
+        # Save the captcha frame HTML for analysis
+        try:
+            html = await captcha_frame.content()
+            with open("screenshots/debug_captcha_frame.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.info("Captcha frame HTML saved for analysis")
+        except Exception as e:
+            logger.warning("Could not save captcha frame HTML: %s", e)
+
+        # Try to detect captcha type in the iframe
+        # Check for standard captcha types first (hCaptcha, reCAPTCHA, Turnstile)
+        token = await self.captcha.detect_and_solve(page)
+        if token:
+            logger.info("Standard captcha solved in popup")
+            return
+
+        # Check for image captcha (BLS might use a custom image captcha)
+        img_el = await captcha_frame.query_selector("img.captcha-image, img[src*='captcha'], img")
+        if img_el:
+            logger.info("Image element found in captcha frame — may need image captcha solving")
+            # TODO: implement image captcha solving via 2captcha normal captcha API
+
+        # Check for a text input + submit button pattern (simple captcha)
+        text_input = await captcha_frame.query_selector("input[type='text']")
+        submit_btn = await captcha_frame.query_selector("button, input[type='submit']")
+
+        if text_input:
+            logger.info("Text input found in captcha frame — looks like text-based captcha")
+            # For now, log what we find; actual solving requires understanding the captcha type
+
+        logger.warning("BLS captcha in popup — need to determine solving strategy. Check debug_captcha_frame.html")
 
     # ------------------------------------------------------------------
     # Cloudflare handling
