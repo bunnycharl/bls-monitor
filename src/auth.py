@@ -156,33 +156,37 @@ class Authenticator:
 
         logger.info("BLS captcha URL: %s", captcha_url[:100])
 
-        # Open captcha page in a new tab
+        # Open captcha page in a new tab, retry up to 3 times
+        max_attempts = 3
         captcha_page = await page.context.new_page()
         try:
-            await captcha_page.goto(captcha_url, wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(2)
+            for attempt in range(1, max_attempts + 1):
+                logger.info("Captcha attempt %d/%d", attempt, max_attempts)
+                await captcha_page.goto(captcha_url, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(2)
 
-            # Save captcha page screenshot
-            try:
-                await captcha_page.screenshot(path="screenshots/debug_captcha_page.png")
-            except Exception:
-                pass
+                # Save captcha page screenshot
+                try:
+                    await captcha_page.screenshot(path="screenshots/debug_captcha_page.png")
+                except Exception:
+                    pass
 
-            # Solve the grid captcha
-            solved = await self.captcha.solve_bls_grid(captcha_page)
-            if not solved:
-                raise RuntimeError("Failed to solve BLS grid captcha")
+                # Solve the grid captcha
+                solved = await self.captcha.solve_bls_grid(captcha_page)
+                if solved:
+                    await asyncio.sleep(2)
+                    result_text = await captcha_page.evaluate(
+                        "() => document.body.innerText || ''"
+                    )
+                    logger.info("Captcha page result: %s", result_text[:200])
+                    break
 
-            # After submit, the captcha page should call parent's OnVarifyCaptcha
-            # Wait for the page to process
-            await asyncio.sleep(2)
-
-            # Check if the captcha page shows a success result
-            result_text = await captcha_page.evaluate("""() => {
-                return document.body.innerText || '';
-            }""")
-            logger.info("Captcha page result text: %s", result_text[:200])
-
+                if attempt < max_attempts:
+                    logger.warning("Captcha attempt %d failed, reloading...", attempt)
+                    # Reload captcha page for a fresh challenge
+                    await asyncio.sleep(1)
+                else:
+                    raise RuntimeError("Failed to solve BLS grid captcha after %d attempts" % max_attempts)
         finally:
             await captcha_page.close()
 

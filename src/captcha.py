@@ -230,6 +230,13 @@ class CaptchaSolver:
         b64_screenshot = base64.b64encode(screenshot_bytes).decode()
         logger.info("Grid screenshot taken (%d bytes)", len(screenshot_bytes))
 
+        # Save for debugging
+        try:
+            with open("screenshots/debug_grid_for_2captcha.png", "wb") as f:
+                f.write(screenshot_bytes)
+        except Exception:
+            pass
+
         # 4. Send to 2captcha grid method (single API call)
         loop = asyncio.get_event_loop()
         try:
