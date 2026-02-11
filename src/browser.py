@@ -128,13 +128,20 @@ class BrowserManager:
         chrome_path = _find_chrome()
         os.makedirs(CHROME_USER_DATA, exist_ok=True)
 
-        # Clean stale lock files from previous runs
-        for lock in ["SingletonLock", "SingletonSocket", "SingletonCookie"]:
-            lock_path = os.path.join(CHROME_USER_DATA, lock)
-            if os.path.exists(lock_path):
+        # Clean ALL stale lock files from previous runs/containers
+        import glob as _glob
+        lock_patterns = [
+            os.path.join(CHROME_USER_DATA, "SingletonLock"),
+            os.path.join(CHROME_USER_DATA, "SingletonSocket"),
+            os.path.join(CHROME_USER_DATA, "SingletonCookie"),
+            os.path.join(CHROME_USER_DATA, "*/lockfile"),
+            os.path.join(CHROME_USER_DATA, "lockfile"),
+        ]
+        for pattern in lock_patterns:
+            for lock_path in _glob.glob(pattern):
                 try:
                     os.remove(lock_path)
-                    logger.info("Removed stale Chrome lock: %s", lock)
+                    logger.info("Removed stale Chrome lock: %s", lock_path)
                 except OSError:
                     pass
 
