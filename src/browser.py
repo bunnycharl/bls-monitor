@@ -155,6 +155,8 @@ class BrowserManager:
             "--disable-sync",
             "--metrics-recording-only",
             "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-gpu",
             "about:blank",
         ]
 

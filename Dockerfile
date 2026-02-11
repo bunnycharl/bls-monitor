@@ -39,9 +39,4 @@ COPY . .
 # Create runtime directories
 RUN mkdir -p logs screenshots session
 
-# Run as non-root user
-RUN useradd -m -s /bin/bash monitor \
-    && chown -R monitor:monitor /app
-USER monitor
-
 CMD ["python", "-m", "src.main"]
