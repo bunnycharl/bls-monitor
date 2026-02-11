@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-# Install Chrome dependencies
+# Install Chrome dependencies and Chrome
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
@@ -22,13 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     xdg-utils \
     lsof \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Google Chrome
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y /tmp/chrome.deb \
+    && rm /tmp/chrome.deb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
