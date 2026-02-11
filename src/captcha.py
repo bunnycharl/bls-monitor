@@ -161,16 +161,13 @@ class CaptchaSolver:
     # ------------------------------------------------------------------
 
     async def solve_bls_grid(self, captcha_page) -> bool:
-        """Solve the BLS custom grid captcha.
+        """Solve the BLS custom grid captcha via 2captcha grid method.
 
-        The captcha shows a 3x3 grid of number images and asks to
-        select all images matching a target number.
-
-        Returns True if solved successfully.
+        Takes a screenshot of the 3x3 grid and sends it as a single
+        request to 2captcha. Returns True if solved successfully.
         """
         # 1. Extract the target number from the visible label
         target_number = await captcha_page.evaluate("""() => {
-            // Find the visible box-label
             const labels = document.querySelectorAll('.box-label');
             for (const label of labels) {
                 const style = window.getComputedStyle(label);
@@ -180,7 +177,6 @@ class CaptchaSolver:
                     if (m) return m[1];
                 }
             }
-            // Fallback: try all labels
             for (const label of labels) {
                 const m = label.textContent.match(/number\\s+(\\d+)/);
                 if (m) return m[1];
@@ -194,85 +190,98 @@ class CaptchaSolver:
 
         logger.info("BLS captcha target number: %s", target_number)
 
-        # 2. Get only VISIBLE cell images (BLS has many hidden honeypot cells)
-        cells = await captcha_page.evaluate("""() => {
+        # 2. Get visible cell IDs in DOM order.
+        #    Real cells have "display: block" in inline style;
+        #    honeypot cells rely on CSS classes for display.
+        cell_ids = await captcha_page.evaluate("""() => {
             const result = [];
-            const imgs = document.querySelectorAll('.captcha-img');
-            for (const img of imgs) {
-                // Check if the image is actually visible
-                const rect = img.getBoundingClientRect();
-                if (rect.width === 0 || rect.height === 0) continue;
-                const style = window.getComputedStyle(img.parentElement);
-                if (style.display === 'none' || style.visibility === 'hidden') continue;
-
-                const parent = img.closest('[id]');
-                const src = img.getAttribute('src') || '';
-                result.push({
-                    id: parent ? parent.id : null,
-                    src: src,
-                });
+            const cells = document.querySelectorAll('.col-4[id]');
+            for (const cell of cells) {
+                if (cell.style.display === 'block') {
+                    result.push(cell.id);
+                }
             }
             return result;
         }""")
 
-        if not cells:
-            logger.error("No captcha cell images found")
+        if not cell_ids or len(cell_ids) < 9:
+            logger.error("Expected 9 visible cells, found %d", len(cell_ids) if cell_ids else 0)
             return False
 
-        logger.info("Found %d captcha cells, recognizing numbers...", len(cells))
+        logger.info("Found %d visible grid cells", len(cell_ids))
 
-        # 3. Recognize each cell's number using 2captcha
+        # 3. Screenshot the captcha grid area
+        grid_el = await captcha_page.query_selector('#captcha-main-div')
+        if not grid_el:
+            grid_el = await captcha_page.query_selector('.main-div-container')
+        if not grid_el:
+            logger.error("Could not find captcha grid element for screenshot")
+            return False
+
+        screenshot_bytes = await grid_el.screenshot(type="png")
+        b64_screenshot = base64.b64encode(screenshot_bytes).decode()
+        logger.info("Grid screenshot taken (%d bytes)", len(screenshot_bytes))
+
+        # 4. Send to 2captcha grid method (single API call)
         loop = asyncio.get_event_loop()
-        matching_ids = []
-
-        for i, cell in enumerate(cells):
-            if not cell.get("src") or not cell.get("id"):
-                continue
-
-            # Extract base64 data from src
-            src = cell["src"]
-            if src.startswith("data:"):
-                # Remove "data:image/...;base64," prefix
-                b64_data = src.split(",", 1)[1] if "," in src else src
-            else:
-                continue
-
-            try:
-                result = await loop.run_in_executor(
-                    None,
-                    lambda b64=b64_data: self._solver.normal(
-                        b64, numeric=1, minLen=2, maxLen=4
-                    ),
-                )
-                recognized = result.get("code", "").strip()
-                logger.info("Cell %d (%s): recognized=%s, target=%s",
-                            i, cell["id"][:8], recognized, target_number)
-
-                if recognized == target_number:
-                    matching_ids.append(cell["id"])
-            except Exception as e:
-                logger.warning("Failed to recognize cell %d: %s", i, e)
-                continue
-
-        if not matching_ids:
-            logger.error("No cells matched target number %s", target_number)
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: self._solver.grid(
+                    b64_screenshot,
+                    rows=3,
+                    columns=3,
+                    hintText=f"Select all images with number {target_number}",
+                ),
+            )
+        except Exception as e:
+            logger.error("2captcha grid solve failed: %s", e)
             return False
 
-        logger.info("Clicking %d matching cells: %s", len(matching_ids), matching_ids)
+        code = result.get("code", "")
+        logger.info("2captcha grid result: %s", code)
 
-        # 4. Click matching cells
+        if not code.startswith("click:"):
+            logger.error("Unexpected grid result format: %s", code)
+            return False
+
+        # 5. Parse "click:3/4/5/8/9" → [3, 4, 5, 8, 9]
+        indices = [int(x) for x in code.replace("click:", "").split("/")]
+
+        # 6. Map 1-indexed cell numbers to visible cell IDs
+        matching_ids = [cell_ids[i - 1] for i in indices if 1 <= i <= len(cell_ids)]
+        if not matching_ids:
+            logger.error("No valid cell indices from grid result")
+            return False
+
+        logger.info("Selecting %d cells: %s", len(matching_ids), matching_ids)
+
+        # 7. Click matching cells via JS Select() function
         for cell_id in matching_ids:
-            img = captcha_page.locator(f"#{cell_id} img")
-            await img.click()
+            safe_id = cell_id.replace("'", "\\'")
+            await captcha_page.evaluate(
+                f"Select('{safe_id}', document.querySelector('#{safe_id} img'))"
+            )
             await asyncio.sleep(0.3)
 
-        # 5. Click "Submit Selection"
-        submit = captcha_page.locator('text=Submit Selection').first
-        await submit.click()
-        await asyncio.sleep(2)
+        # 8. Submit via JS onSubmit()
+        await captcha_page.evaluate("onSubmit()")
 
-        logger.info("BLS captcha submitted")
-        return True
+        # 9. Wait for success response
+        try:
+            await captcha_page.wait_for_function("""() => {
+                const msg = document.getElementById('captcha-message-div');
+                return msg && window.getComputedStyle(msg).display !== 'none';
+            }""", timeout=15000)
+            logger.info("BLS captcha verified successfully")
+            return True
+        except Exception:
+            logger.warning("Captcha success message not detected, checking page state...")
+            result_text = await captcha_page.evaluate(
+                "() => document.body.innerText || ''"
+            )
+            logger.info("Captcha page text: %s", result_text[:300])
+            return "Verified" in result_text
 
     # ------------------------------------------------------------------
     # Token injection
