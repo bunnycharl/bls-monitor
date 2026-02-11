@@ -272,39 +272,62 @@ class CaptchaSolver:
             )
             await asyncio.sleep(0.3)
 
-        # 8. Check form exists, set selection, and submit
-        form_ok = await captcha_page.evaluate("""(ids) => {
+        # 8. Log form details and submit
+        form_info = await captcha_page.evaluate("""() => {
             const form = document.getElementById('captchaForm');
-            const field = document.getElementById('SelectedImages');
+            if (!form) return {exists: false};
             return {
-                formExists: !!form,
-                fieldExists: !!field,
+                exists: true,
+                action: form.action,
+                method: form.method,
+                dataAjax: form.getAttribute('data-ajax'),
+                dataAjaxSuccess: form.getAttribute('data-ajax-success'),
                 selectionCount: window.selection ? window.selection.length : -1,
             };
-        }""", matching_ids)
-        logger.info("Form state: %s", form_ok)
+        }""")
+        logger.info("Form info: %s", form_info)
 
-        await captcha_page.evaluate("onSubmit()")
-
-        # 9. Wait for success response (ajax callback shows #captcha-message-div)
+        # Submit and intercept the server response
+        server_response = None
         try:
-            await captcha_page.wait_for_function("""() => {
-                const msg = document.getElementById('captcha-message-div');
-                return msg && window.getComputedStyle(msg).display !== 'none';
-            }""", timeout=15000)
+            async with captcha_page.expect_response(
+                lambda r: "Captcha" in r.url, timeout=30000
+            ) as resp_info:
+                await captcha_page.evaluate("onSubmit()")
+            response = await resp_info.value
+            try:
+                server_response = await response.json()
+            except Exception:
+                server_response = await response.text()
+            logger.info("Captcha server response (%d): %s",
+                        response.status, str(server_response)[:500])
+        except Exception as e:
+            logger.warning("No response intercepted: %s", e)
+            # Still try to check if the page updated
+            await asyncio.sleep(3)
+
+        # 9. Check for success
+        success = await captcha_page.evaluate("""() => {
+            const msg = document.getElementById('captcha-message-div');
+            return msg && window.getComputedStyle(msg).display !== 'none';
+        }""")
+
+        if success:
             logger.info("BLS captcha verified successfully")
             return True
+
+        # Check if server told us it was wrong
+        if isinstance(server_response, dict):
+            if server_response.get("success"):
+                logger.info("Server confirmed captcha success")
+                return True
+            logger.warning("Server rejected captcha: %s", server_response)
+
+        try:
+            await captcha_page.screenshot(path="screenshots/debug_captcha_after_submit.png")
         except Exception:
-            # Save debug screenshot
-            try:
-                await captcha_page.screenshot(path="screenshots/debug_captcha_after_submit.png")
-            except Exception:
-                pass
-            result_text = await captcha_page.evaluate(
-                "() => document.body.innerText || ''"
-            )
-            logger.warning("Captcha not verified. Page text: %s", result_text[:300])
-            return "Verified" in result_text
+            pass
+        return False
 
     # ------------------------------------------------------------------
     # Token injection
