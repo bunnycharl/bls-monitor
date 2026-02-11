@@ -41,7 +41,7 @@ class Authenticator:
         # Quick check: go to home page, see if redirected to login
         await page.goto(
             self.config["bls"]["home_url"],
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=30000,
         )
         if "login" in page.url.lower():
@@ -53,7 +53,7 @@ class Authenticator:
 
         await page.goto(
             self.config["bls"]["login_url"],
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=30000,
         )
         await self.human.random_delay(2000, 4000)
@@ -61,15 +61,6 @@ class Authenticator:
         # Handle Cloudflare challenge if present
         if await self._is_cloudflare(page):
             await self._handle_cloudflare(page)
-
-        # Debug: save screenshot and HTML to diagnose selectors
-        import os
-        os.makedirs("screenshots", exist_ok=True)
-        await page.screenshot(path="screenshots/debug_login_page.png", full_page=True)
-        html = await page.content()
-        with open("screenshots/debug_login_page.html", "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.info("Debug: saved login page screenshot and HTML")
 
         # Fill email
         email_sel = 'input[type="email"], input[name="email"], input#email, input[name="Email"]'
@@ -132,7 +123,7 @@ class Authenticator:
             submit = await page.query_selector("input[type='submit'], button[type='submit']")
             if submit:
                 await submit.click()
-            await page.wait_for_load_state("networkidle", timeout=15000)
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
             if not await self._is_cloudflare(page):
                 return
 

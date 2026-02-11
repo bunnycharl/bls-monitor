@@ -37,7 +37,7 @@ class FormFiller:
         logger.info("Navigating to VisaTypeVerification")
         await page.goto(
             self.config["bls"]["visa_verification_url"],
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=30000,
         )
         await self.human.random_delay(2000, 4000)
@@ -63,7 +63,7 @@ class FormFiller:
         await self.human.click_with_delay(submit)
 
         # Wait for redirect to visatype page
-        await page.wait_for_load_state("networkidle", timeout=20000)
+        await page.wait_for_load_state("domcontentloaded", timeout=20000)
         logger.info("On form page: %s", page.url)
 
     # ------------------------------------------------------------------

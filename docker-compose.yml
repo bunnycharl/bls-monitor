@@ -1,0 +1,14 @@
+services:
+  bls-monitor:
+    build: .
+    container_name: bls-monitor
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./config/settings.yaml:/app/config/settings.yaml:ro
+      - ./session:/app/session
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
+    # Chrome needs shared memory
+    shm_size: "2gb"

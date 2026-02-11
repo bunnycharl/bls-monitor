@@ -1,3 +1,4 @@
+import glob
 import logging
 import os
 import time
@@ -10,6 +11,9 @@ from .form_filler import FormFiller
 from .notifier import TelegramNotifier
 
 logger = logging.getLogger(__name__)
+
+SCREENSHOTS_DIR = "screenshots"
+MAX_SCREENSHOTS = 50
 
 
 class SlotChecker:
@@ -48,13 +52,28 @@ class SlotChecker:
 
         # 5. Take screenshot
         screenshot_path = self._screenshot_path()
-        os.makedirs(os.path.dirname(screenshot_path), exist_ok=True)
+        os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
         await page.screenshot(path=screenshot_path, full_page=True)
         logger.info("Screenshot saved: %s", screenshot_path)
+
+        # 6. Rotate old screenshots
+        self._rotate_screenshots()
 
         return available, screenshot_path
 
     @staticmethod
     def _screenshot_path() -> str:
         ts = int(time.time())
-        return f"screenshots/check_{ts}.png"
+        return f"{SCREENSHOTS_DIR}/check_{ts}.png"
+
+    @staticmethod
+    def _rotate_screenshots() -> None:
+        """Keep only the most recent MAX_SCREENSHOTS files."""
+        pattern = os.path.join(SCREENSHOTS_DIR, "check_*.png")
+        files = sorted(glob.glob(pattern), key=os.path.getmtime)
+        to_remove = files[:-MAX_SCREENSHOTS] if len(files) > MAX_SCREENSHOTS else []
+        for path in to_remove:
+            try:
+                os.remove(path)
+            except OSError:
+                pass

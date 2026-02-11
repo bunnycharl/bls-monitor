@@ -2,11 +2,12 @@ import asyncio
 import json
 import logging
 import os
-import shutil
+import socket
 import subprocess
 from urllib.parse import urlparse
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright_stealth import stealth_async
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +17,10 @@ PROXY_EXT_DIR = "session/proxy_ext"
 
 
 def _find_chrome() -> str:
-    """Find Chrome executable on Windows or Linux."""
+    """Find Chrome executable on Windows, macOS, or Linux."""
     candidates = [
+        # macOS
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         # Windows
         os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
         os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
@@ -47,34 +50,34 @@ def _parse_proxy(proxy_str: str) -> dict:
 
 
 def _create_proxy_auth_extension(username: str, password: str) -> str:
-    """Generate a Manifest V2 Chrome extension for proxy authentication."""
+    """Generate a Manifest V3 Chrome extension for proxy authentication."""
     os.makedirs(PROXY_EXT_DIR, exist_ok=True)
 
     manifest = {
         "version": "1.0.0",
-        "manifest_version": 2,
+        "manifest_version": 3,
         "name": "Proxy Auth",
-        "permissions": [
-            "webRequest",
-            "webRequestBlocking",
-            "<all_urls>",
-        ],
+        "permissions": ["webRequest", "webRequestAuthProvider"],
+        "host_permissions": ["<all_urls>"],
         "background": {
-            "scripts": ["background.js"],
+            "service_worker": "background.js",
         },
     }
 
+    safe_user = json.dumps(username)
+    safe_pass = json.dumps(password)
+
     background_js = f"""chrome.webRequest.onAuthRequired.addListener(
-  function(details) {{
-    return {{
+  function(details, callbackFn) {{
+    callbackFn({{
       authCredentials: {{
-        username: "{username}",
-        password: "{password}"
+        username: {safe_user},
+        password: {safe_pass}
       }}
-    }};
+    }});
   }},
   {{ urls: ["<all_urls>"] }},
-  ["blocking"]
+  ["asyncBlocking"]
 );
 """
 
@@ -84,6 +87,38 @@ def _create_proxy_auth_extension(username: str, password: str) -> str:
         f.write(background_js)
 
     return os.path.abspath(PROXY_EXT_DIR)
+
+
+def _kill_zombie_chrome(port: int) -> None:
+    """Kill any existing Chrome process listening on the CDP port."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        result = sock.connect_ex(("127.0.0.1", port))
+        if result == 0:
+            logger.warning("Port %d already in use, killing zombie Chrome...", port)
+            import platform
+            if platform.system() == "Windows":
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "chrome.exe"],
+                    capture_output=True,
+                )
+            else:
+                subprocess.run(
+                    ["lsof", "-ti", f":{port}"],
+                    capture_output=True, text=True,
+                )
+                result_lsof = subprocess.run(
+                    ["lsof", "-ti", f":{port}"],
+                    capture_output=True, text=True,
+                )
+                for pid in result_lsof.stdout.strip().split("\n"):
+                    if pid:
+                        subprocess.run(["kill", "-9", pid], capture_output=True)
+            logger.info("Zombie Chrome killed, waiting for port to free...")
+            import time
+            time.sleep(2)
+    finally:
+        sock.close()
 
 
 class BrowserManager:
@@ -96,6 +131,8 @@ class BrowserManager:
         self._chrome_proc: subprocess.Popen | None = None
 
     async def launch(self) -> None:
+        _kill_zombie_chrome(CDP_PORT)
+
         self._playwright = await async_playwright().start()
         bc = self.config["browser"]
 
@@ -117,6 +154,7 @@ class BrowserManager:
             "--disable-prompt-on-repost",
             "--disable-sync",
             "--metrics-recording-only",
+            "--disable-blink-features=AutomationControlled",
             "about:blank",
         ]
 
@@ -170,10 +208,16 @@ class BrowserManager:
             self._context = await self._browser.new_context()
             self.page = await self._context.new_page()
 
-        logger.info("Connected to Chrome via CDP (headless=%s)", bc["headless"])
+        # Apply stealth to avoid bot detection
+        await stealth_async(self.page)
+        await self.page.add_init_script("""() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
+            window.chrome = { runtime: {} };
+        }""")
 
-    async def save_session(self) -> None:
-        pass
+        logger.info("Connected to Chrome via CDP (headless=%s)", bc["headless"])
 
     async def close(self) -> None:
         try:

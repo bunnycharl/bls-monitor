@@ -7,6 +7,9 @@ from twocaptcha import TwoCaptcha
 
 logger = logging.getLogger(__name__)
 
+MAX_SOLVE_RETRIES = 3
+SOLVE_RETRY_DELAY = 5  # seconds
+
 
 class CaptchaSolver:
     def __init__(self, config: dict):
@@ -34,6 +37,15 @@ class CaptchaSolver:
         await self._inject_token(page, captcha_type, token)
         logger.info("Captcha token injected (len=%d)", len(token))
         return token
+
+    def check_balance(self) -> float:
+        """Return current 2captcha account balance in USD."""
+        try:
+            balance = self._solver.balance()
+            return float(balance)
+        except Exception as e:
+            logger.error("Failed to check 2captcha balance: %s", e)
+            return -1.0
 
     # ------------------------------------------------------------------
     # Detection
@@ -102,28 +114,46 @@ class CaptchaSolver:
         return ("hcaptcha", sitekey)
 
     # ------------------------------------------------------------------
-    # Remote solving via 2captcha
+    # Remote solving via 2captcha (with retry)
     # ------------------------------------------------------------------
 
     async def _solve_remote(self, captcha_type: str, sitekey: str, url: str) -> str:
         loop = asyncio.get_event_loop()
+        last_error = None
 
-        if captcha_type == "hcaptcha":
-            result = await loop.run_in_executor(
-                None, lambda: self._solver.hcaptcha(sitekey=sitekey, url=url)
-            )
-        elif captcha_type == "turnstile":
-            result = await loop.run_in_executor(
-                None, lambda: self._solver.turnstile(sitekey=sitekey, url=url)
-            )
-        elif captcha_type == "recaptcha":
-            result = await loop.run_in_executor(
-                None, lambda: self._solver.recaptcha(sitekey=sitekey, url=url)
-            )
-        else:
-            raise ValueError(f"Unknown captcha type: {captcha_type}")
+        for attempt in range(1, MAX_SOLVE_RETRIES + 1):
+            try:
+                if captcha_type == "hcaptcha":
+                    result = await loop.run_in_executor(
+                        None, lambda: self._solver.hcaptcha(sitekey=sitekey, url=url)
+                    )
+                elif captcha_type == "turnstile":
+                    result = await loop.run_in_executor(
+                        None, lambda: self._solver.turnstile(sitekey=sitekey, url=url)
+                    )
+                elif captcha_type == "recaptcha":
+                    result = await loop.run_in_executor(
+                        None, lambda: self._solver.recaptcha(sitekey=sitekey, url=url)
+                    )
+                else:
+                    raise ValueError(f"Unknown captcha type: {captcha_type}")
 
-        return result["code"]
+                return result["code"]
+
+            except ValueError:
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "2captcha attempt %d/%d failed: %s",
+                    attempt, MAX_SOLVE_RETRIES, e,
+                )
+                if attempt < MAX_SOLVE_RETRIES:
+                    await asyncio.sleep(SOLVE_RETRY_DELAY)
+
+        raise RuntimeError(
+            f"2captcha failed after {MAX_SOLVE_RETRIES} attempts: {last_error}"
+        )
 
     # ------------------------------------------------------------------
     # Token injection
